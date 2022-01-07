@@ -41,7 +41,7 @@ def sample_step_noise(model, x, steps, eta, extra_args, ts, alphas, sigmas, i, p
 
 def sample_setup(model, x, steps, eta, extra_args):
     """Draws samples from a model given starting noise."""
-
+    
     # print("SAMPLE SETUP ", steps.shape)
     ts = x.new_ones([x.shape[0]])
 
@@ -76,7 +76,7 @@ def sample(model, x, steps, eta, extra_args):
 
 # this is the original version of sample which did everything at once
 @torch.no_grad()
-def sample_original(model, x, steps, eta, extra_args):
+def sample_original(model, x, steps, eta, extra_args, callback=None):
     """Draws samples from a model given starting noise."""
     ts = x.new_ones([x.shape[0]])
 
