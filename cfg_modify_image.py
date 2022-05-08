@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
-"""Classifier-free guidance sampling from a diffusion model."""
+"""Applies a text prompt to an existing image by finding a latent that would produce it
+with the unconditioned DDIM ODE, then integrating the text-conditional DDIM ODE starting
+from that latent."""
 
 import argparse
 from functools import partial
@@ -39,31 +41,25 @@ def resize_and_center_crop(image, size):
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    p.add_argument('init', type=str,
+                   help='the init image')
     p.add_argument('prompts', type=str, default=[], nargs='*',
                    help='the text prompts to use')
     p.add_argument('--images', type=str, default=[], nargs='*', metavar='IMAGE',
                    help='the image prompts')
-    p.add_argument('--batch-size', '-bs', type=int, default=1,
-                   help='the number of images per batch')
     p.add_argument('--checkpoint', type=str,
                    help='the checkpoint to use')
     p.add_argument('--device', type=str,
                    help='the device to use')
-    p.add_argument('--eta', type=float, default=1.,
-                   help='the amount of noise to add during sampling (0-1)')
-    p.add_argument('--init', type=str,
-                   help='the init image')
+    p.add_argument('--max-timestep', '-mt', type=float, default=1.,
+                   help='the maximum timestep')
     p.add_argument('--model', type=str, default='cc12m_1_cfg', choices=['cc12m_1_cfg'],
                    help='the model to use')
-    p.add_argument('-n', type=int, default=1,
-                   help='the number of images to sample')
-    p.add_argument('--seed', type=int, default=0,
-                   help='the random seed')
+    p.add_argument('--output', '-o', type=str, default='out.png',
+                   help='the output filename')
     p.add_argument('--size', type=int, nargs=2,
                    help='the output image size')
-    p.add_argument('--starting-timestep', '-st', type=float, default=0.9,
-                   help='the timestep to start at (used with init images)')
-    p.add_argument('--steps', type=int, default=500,
+    p.add_argument('--steps', type=int, default=250,
                    help='the number of timesteps')
     args = p.parse_args()
 
@@ -90,10 +86,9 @@ def main():
     normalize = transforms.Normalize(mean=[0.48145466, 0.4578275, 0.40821073],
                                      std=[0.26862954, 0.26130258, 0.27577711])
 
-    if args.init:
-        init = Image.open(utils.fetch(args.init)).convert('RGB')
-        init = resize_and_center_crop(init, (side_x, side_y))
-        init = utils.from_pil_image(init).to(device)[None].repeat([args.n, 1, 1, 1])
+    init = Image.open(utils.fetch(args.init)).convert('RGB')
+    init = resize_and_center_crop(init, (side_x, side_y))
+    init = utils.from_pil_image(init).to(device)[None]
 
     zero_embed = torch.zeros([1, clip_model.visual.output_dim], device=device)
     target_embeds, weights = [zero_embed], []
@@ -115,8 +110,6 @@ def main():
 
     weights = torch.tensor([1 - sum(weights), *weights], device=device)
 
-    torch.manual_seed(args.seed)
-
     def cfg_model_fn(x, t):
         n = x.shape[0]
         n_conds = len(target_embeds)
@@ -127,25 +120,16 @@ def main():
         v = vs.mul(weights[:, None, None, None, None]).sum(0)
         return v
 
-    def run(x, steps):
-        return sampling.sample(cfg_model_fn, x, steps, args.eta, {})
-
-    def run_all(n, batch_size):
-        x = torch.randn([n, 3, side_y, side_x], device=device)
-        t = torch.linspace(1, 0, args.steps + 1, device=device)[:-1]
+    def run():
+        t = torch.linspace(0, 1, args.steps + 1, device=device)
         steps = utils.get_spliced_ddpm_cosine_schedule(t)
-        if args.init:
-            steps = steps[steps < args.starting_timestep]
-            alpha, sigma = utils.t_to_alpha_sigma(steps[0])
-            x = init * alpha + x * sigma
-        for i in trange(0, n, batch_size):
-            cur_batch_size = min(n - i, batch_size)
-            outs = run(x[i:i+cur_batch_size], steps)
-            for j, out in enumerate(outs):
-                utils.to_pil_image(out).save(f'out_{i + j:05}.png')
+        steps = steps[steps <= args.max_timestep]
+        x = sampling.reverse_sample(model, init, steps, {'clip_embed': zero_embed})
+        out = sampling.sample(cfg_model_fn, x, steps.flip(0)[:-1], 0, {})
+        utils.to_pil_image(out[0]).save(args.output)
 
     try:
-        run_all(args.n, args.batch_size)
+        run()
     except KeyboardInterrupt:
         pass
 
